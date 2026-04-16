@@ -1,41 +1,93 @@
-import os
-import asyncio
+import pandas as pd
+from telegram import Update, ChatPermissions
+from telegram.ext import Application, MessageHandler, ContextTypes, filters
 from datetime import datetime, timedelta
-from supabase import create_client, Client
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ChatJoinRequestHandler, ContextTypes
+import asyncio
 
-# তোমার সুপাবেস ডিটেইলস
-SUPABASE_URL = "https://jjevliuuyrlhhasxcdmc.supabase.co"
-SUPABASE_KEY = "sb_publishable_9F4tebwyaM0mCz1RwSvIfw_cpQJqB-f" # এটা তোমার ANON KEY হওয়া উচিত
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# সেটিংস
+BOT_TOKEN = "8711531840:AAFYTlYEt0ji7R2LqKfp89DWagJ2mJlr0Bg"
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRXefpWbtvo6CHymAIeEA8ORZkclDUYCVq8HS1h5l4gaSz-lE20Vls63pQyfagt_uMwtxRleXY7eYc5/pub?output=csv"
+GROUP_ID = -1003934746677
 
-async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    request = update.chat_join_request
-    user_id = str(request.from_user.id)
-    chat_id = request.chat.id
-
-    # ১. সুপাবেস থেকে ইউজার চেক করা
-    # ধরে নিচ্ছি তোমার টেবিলের নাম 'users' এবং কলাম 'uid' ও 'is_verified'
-    response = supabase.table("users").select("is_verified").eq("uid", user_id).execute()
-    user_data = response.data
-
-    if user_data and user_data[0].get('is_verified') == True:
-        # ভেরিফাইড হলে জয়েন অ্যাপ্রুভ এবং ওয়েলকাম
-        await request.approve()
-        await context.bot.send_message(
-            chat_id=user_id, 
-            text=f"অভিনন্দন {request.from_user.first_name}! আপনি ভেরিফাইড ইউজার হিসেবে গ্রুপে যুক্ত হয়েছেন।"
-        )
-    else:
-        # ভেরিফাইড না হলে ডিক্লাইন এবং ২ ঘণ্টার জন্য ব্লক
-        await request.decline()
-        until_date = datetime.now() + timedelta(hours=2)
-        await context.bot.ban_chat_member(chat_id=chat_id, user_id=int(user_id), until_date=until_date)
+def check_verification(user_id):
+    try:
+        # প্রতিবার লেটেস্ট ডাটা রিড করা
+        df = pd.read_csv(SHEET_CSV_URL)
+        df.columns = df.columns.str.strip()
+        user_row = df[df['User_ID'].astype(str).str.strip() == str(user_id).strip()]
         
-        await context.bot.send_message(
-            chat_id=user_id, 
-            text="দুঃখিত! আপনি ভেরিফাইড নন। আপনাকে ২ ঘণ্টার জন্য ব্লক করা হয়েছে।"
-        )
+        if not user_row.empty:
+            status = str(user_row.iloc[0]['Status']).strip().lower()
+            return status == "verified"
+        return False
+    except Exception as e:
+        print(f"Sheet Error: {e}")
+        return False
 
-# মেইন ফাংশন এবং হ্যান্ডলার সেটআপ...
+async def on_user_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.id != GROUP_ID:
+        return
+
+    for user in update.message.new_chat_members:
+        if user.is_bot: continue
+        
+        user_id = user.id
+        first_name = user.first_name
+
+        # ১. প্রথমেই মিউট করা
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id=GROUP_ID,
+                user_id=user_id,
+                permissions=ChatPermissions(can_send_messages=False)
+            )
+        except Exception as e:
+            print(f"Mute Error: {e}")
+
+        welcome_msg = await update.message.reply_text(f"👋 {first_name}, ভেরিফিকেশন চেক চলছে... ১০ সেকেন্ড অপেক্ষা করুন।")
+
+        # ২. ১০ সেকেন্ড ওয়েট
+        await asyncio.sleep(10)
+
+        # ৩. ভেরিফিকেশন রেজাল্ট অনুযায়ী একশন
+        if check_verification(user_id):
+            try:
+                # সব পারমিশন একদম ক্লিয়ার করে দেওয়া
+                await context.bot.restrict_chat_member(
+                    chat_id=GROUP_ID,
+                    user_id=user_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_audios=True,
+                        can_send_documents=True,
+                        can_send_photos=True,
+                        can_send_videos=True,
+                        can_send_video_notes=True,
+                        can_send_voice_notes=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True
+                    )
+                )
+                await welcome_msg.edit_text(f"✅ ভেরিফিকেশন সফল! {first_name}, এখন আপনি Raybil World-এ মেসেজ করতে পারবেন।")
+                print(f"Verified & Unmuted: {first_name} ({user_id})")
+            except Exception as e:
+                print(f"Unmute Error: {e}")
+                await welcome_msg.edit_text("⚠️ ভেরিফিকেশন সফল হলেও পারমিশন দিতে সমস্যা হচ্ছে। অ্যাডমিনকে জানান।")
+        else:
+            await welcome_msg.edit_text(f"❌ দুঃখিত {first_name}, আপনি ভেরিফাইড নন। ২ ঘণ্টা পর চেষ্টা করুন।")
+            try:
+                await context.bot.ban_chat_member(
+                    chat_id=GROUP_ID,
+                    user_id=user_id,
+                    until_date=datetime.now() + timedelta(hours=2)
+                )
+                print(f"Banned: {first_name} ({user_id})")
+            except Exception as e:
+                print(f"Ban Error: {e}")
+
+if __name__ == '__main__':
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_user_join))
+    print("Raybil Security Bot is running with Fixes...")
+    app.run_polling()
